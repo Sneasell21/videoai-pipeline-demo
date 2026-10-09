@@ -197,42 +197,43 @@ def _sb():
         return None
 
 
+def _sb_listar_recursivo(client, prefijo="", profundidad=0, max_prof=6):
+    """Recorre el bucket en profundidad y devuelve todos los videos con su ruta completa."""
+    if profundidad > max_prof:
+        return []
+    try:
+        entradas = client.storage.from_(SUPABASE_BUCKET).list(prefijo) or []
+    except Exception:
+        return []
+    resultado = []
+    for entry in entradas:
+        if not isinstance(entry, dict):
+            continue
+        nombre = entry.get("name", "")
+        ruta = f"{prefijo}/{nombre}" if prefijo else nombre
+        ext = nombre.rsplit(".", 1)[-1].lower() if "." in nombre else ""
+        if ext in CONTENT_TYPES:
+            e_copia = dict(entry)
+            e_copia["name"] = ruta
+            resultado.append(e_copia)
+        elif entry.get("id") is None and nombre:
+            resultado.extend(
+                _sb_listar_recursivo(client, ruta, profundidad + 1, max_prof)
+            )
+    return resultado
+
+
 def sb_listar_videos():
     """
-    Lista videos en el bucket (raíz + un nivel de subcarpetas).
-    El campo 'name' de cada entrada incluye la ruta completa (ej. PiCam01/video.mp4).
+    Lista todos los videos en el bucket (recursivo, cualquier profundidad).
+    El campo 'name' incluye la ruta completa (ej. PiCam01/20261009/clip.mp4).
     Retorna (lista, error_str|None).
     """
     client = _sb()
     if client is None:
         return [], "No se pudo crear el cliente Supabase — verificá SUPABASE_URL y SUPABASE_KEY."
     try:
-        resultado = []
-        raiz = client.storage.from_(SUPABASE_BUCKET).list() or []
-
-        for entry in raiz:
-            if not isinstance(entry, dict):
-                continue
-            nombre = entry.get("name", "")
-            ext = nombre.rsplit(".", 1)[-1].lower() if "." in nombre else ""
-
-            if ext in CONTENT_TYPES:
-                resultado.append(entry)
-            elif entry.get("id") is None and nombre:
-                # entrada sin id → es una carpeta; listar su contenido
-                try:
-                    sub = client.storage.from_(SUPABASE_BUCKET).list(nombre) or []
-                    for f in sub:
-                        if not isinstance(f, dict):
-                            continue
-                        if f.get("name", "").rsplit(".", 1)[-1].lower() in CONTENT_TYPES:
-                            f_copia = dict(f)
-                            f_copia["name"] = f"{nombre}/{f['name']}"
-                            resultado.append(f_copia)
-                except Exception:
-                    pass
-
-        return resultado, None
+        return _sb_listar_recursivo(client), None
     except Exception as e:
         return [], str(e)
 
@@ -265,25 +266,8 @@ def sb_diagnostico():
         raw = raw_resp if isinstance(raw_resp, list) else []
         info["raw_type"] = type(raw_resp).__name__
         info["total_objetos_raw"] = len(raw)
-        # Expandir subcarpetas para el diagnóstico
-        todos = []
-        for entry in raw:
-            if not isinstance(entry, dict):
-                continue
-            nombre = entry.get("name", "")
-            if entry.get("id") is None and nombre and "." not in nombre:
-                # es carpeta
-                try:
-                    sub = client.storage.from_(SUPABASE_BUCKET).list(nombre) or []
-                    for f in sub:
-                        if isinstance(f, dict):
-                            f_copia = dict(f)
-                            f_copia["name"] = f"{nombre}/{f.get('name', '')}"
-                            todos.append(f_copia)
-                except Exception:
-                    pass
-            else:
-                todos.append(entry)
+        # Listado recursivo completo para diagnóstico
+        todos = _sb_listar_recursivo(client)
 
         info["objetos_raw"] = [
             {"name": f.get("name"), "size": (f.get("metadata") or {}).get("size"), "created_at": f.get("created_at")}
