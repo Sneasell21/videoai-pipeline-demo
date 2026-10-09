@@ -261,7 +261,9 @@ def sb_diagnostico():
         return info
     info["cliente_ok"] = True
     try:
-        raw = client.storage.from_(SUPABASE_BUCKET).list() or []
+        raw_resp = client.storage.from_(SUPABASE_BUCKET).list()
+        raw = raw_resp if isinstance(raw_resp, list) else []
+        info["raw_type"] = type(raw_resp).__name__
         info["total_objetos_raw"] = len(raw)
         # Expandir subcarpetas para el diagnóstico
         todos = []
@@ -773,7 +775,12 @@ def seccion_videos_entrantes():
                 st.markdown("**Todos los objetos en el bucket:**")
                 st.dataframe(d["objetos_raw"], use_container_width=True, hide_index=True)
             elif d["cliente_ok"] and d["total_objetos_raw"] == 0:
-                st.warning(f"El bucket `{SUPABASE_BUCKET}` está vacío (raíz y subcarpetas).")
+                st.warning(
+                    f"El bucket `{SUPABASE_BUCKET}` devuelve vacío. "
+                    "Causa más común: estás usando el **anon key** y RLS bloquea el listado. "
+                    "Solución: usá el **service_role key** en `SUPABASE_KEY` (Settings → API en el dashboard de Supabase)."
+                )
+                st.caption(f"Tipo de respuesta raw: `{d.get('raw_type', '?')}`")
 
     if not SUPABASE_DISPONIBLE:
         return
