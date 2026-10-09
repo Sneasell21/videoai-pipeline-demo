@@ -90,6 +90,7 @@ _DEFAULTS = {
     "historial": [],
     "resultado": None,
     "video_pendiente": None,  # nombre de video en Supabase esperando ser procesado
+    "galeria_pagina": 0,
 }
 for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:
@@ -783,34 +784,57 @@ def seccion_videos_entrantes():
     videos = sorted(videos, key=lambda v: v.get("created_at") or "", reverse=True)
 
     ya_procesados = {h["Nombre"] for h in st.session_state.historial}
-    st.caption(f"{len(videos)} video{'s' if len(videos) > 1 else ''} disponible{'s' if len(videos) > 1 else ''}")
 
-    for i in range(0, len(videos), 2):
+    POR_PAGINA = 3
+    total_paginas = max(1, -(-len(videos) // POR_PAGINA))  # ceil division
+    pagina = min(st.session_state.galeria_pagina, total_paginas - 1)
+    st.session_state.galeria_pagina = pagina
+
+    inicio = pagina * POR_PAGINA
+    pagina_videos = videos[inicio : inicio + POR_PAGINA]
+
+    # Contador + controles de paginación
+    info_col, nav_col = st.columns([3, 2])
+    info_col.caption(
+        f"{len(videos)} video{'s' if len(videos) > 1 else ''} · "
+        f"página {pagina + 1} de {total_paginas}"
+    )
+    with nav_col:
+        bc1, bc2, bc3 = st.columns(3)
+        if bc1.button("◀ Anterior", disabled=pagina == 0, use_container_width=True):
+            st.session_state.galeria_pagina -= 1
+            st.rerun()
+        bc2.caption(f"{pagina + 1} / {total_paginas}")
+        if bc3.button("Siguiente ▶", disabled=pagina >= total_paginas - 1, use_container_width=True):
+            st.session_state.galeria_pagina += 1
+            st.rerun()
+
+    # Solo carga URLs para los 3 videos visibles
+    for i in range(0, len(pagina_videos), 2):
         cols = st.columns(2)
-        for col, v in zip(cols, videos[i : i + 2]):
+        for col, v in zip(cols, pagina_videos[i : i + 2]):
             nombre = v["name"]
+            nombre_corto = nombre.rsplit("/", 1)[-1]  # solo el filename para mostrar
             size_mb = (v.get("metadata") or {}).get("size", 0) / 1024 / 1024
             fecha = (v.get("created_at") or "")[:10]
             procesado = nombre in ya_procesados
 
             with col:
                 with st.container(border=True):
-                    # Header: nombre + badge
                     h1, h2 = st.columns([3, 1])
-                    h1.markdown(f"**{nombre}**")
+                    h1.markdown(f"**{nombre_corto}**")
+                    h1.caption(nombre.rsplit("/", 1)[0] if "/" in nombre else "")
                     h2.markdown(
                         f"<div style='text-align:right'>{'🟢' if procesado else '🟡'}</div>",
                         unsafe_allow_html=True,
                     )
 
-                    # Player inline
                     url = sb_url_video(nombre)
                     if url:
                         st.video(url)
                     else:
                         st.caption("⚠️ Preview no disponible.")
 
-                    # Metadata
                     meta = []
                     if size_mb > 0:
                         meta.append(f"📦 {size_mb:.1f} MB")
@@ -819,7 +843,6 @@ def seccion_videos_entrantes():
                     if meta:
                         st.caption(" · ".join(meta))
 
-                    # Acción
                     if not procesado:
                         if st.button(
                             "🚀 Procesar este video",
