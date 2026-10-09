@@ -1,5 +1,5 @@
 """
-VideoAI · Pipeline de Procesamiento
+Pantera Lab Video · Pipeline de Procesamiento
 Demo Streamlit — listo para Streamlit Community Cloud
 """
 
@@ -14,8 +14,8 @@ import streamlit as st
 
 # ── Configuración de página (debe ser la primera llamada) ─────────────────────
 st.set_page_config(
-    page_title="VideoAI · Pipeline",
-    page_icon="🎬",
+    page_title="Pantera Lab Video · Pipeline",
+    page_icon="🐆",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -264,6 +264,55 @@ def _linea_log(rng, paso_idx: int, step: dict, frame: int, total: int) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# MONITOREO DE SUBIDA (métricas animadas)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _animar_subida(nombre: str, tamaño_bytes: int):
+    """Muestra métricas animadas de subida con rangos realistas."""
+    rng = random.Random(hash(nombre) ^ 0xABCD)
+    total_mb = max(tamaño_bytes / 1024 / 1024, 0.01)
+
+    with st.container(border=True):
+        st.markdown("##### 📡 Monitoreo de subida")
+        pb = st.progress(0, text="Preparando transferencia...")
+        cols = st.columns(4)
+        ph_vel   = cols[0].empty()
+        ph_pico  = cols[1].empty()
+        ph_trans = cols[2].empty()
+        ph_eta   = cols[3].empty()
+
+        pasos = 22
+        historial_vel = []
+        pico = 0.0
+
+        for i in range(pasos + 1):
+            pct = i / pasos
+
+            # velocidad con variación en rango [6.2, 48.5] MB/s
+            vel_base = rng.uniform(18.0, 38.0)
+            ruido    = rng.uniform(-12.0, 10.0)
+            vel      = max(6.2, min(48.5, vel_base + ruido))
+            historial_vel.append(vel)
+            pico = max(pico, vel)
+
+            vel_prom   = sum(historial_vel) / len(historial_vel)
+            transferido = total_mb * pct
+            eta         = (total_mb - transferido) / vel if vel > 0 and pct < 1 else 0.0
+
+            delta_vel = f"{vel - historial_vel[-2]:+.1f}" if len(historial_vel) > 1 else None
+
+            texto_barra = f"Subiendo... {pct:.0%}  —  {vel:.1f} MB/s" if pct < 1 else "✅ Transferencia completada"
+            pb.progress(pct, text=texto_barra)
+
+            ph_vel.metric("⚡ Velocidad actual", f"{vel:.1f} MB/s", delta=delta_vel)
+            ph_pico.metric("🏔 Pico / Promedio", f"{pico:.1f} / {vel_prom:.1f} MB/s")
+            ph_trans.metric("📦 Transferido", f"{transferido:.2f} / {total_mb:.2f} MB")
+            ph_eta.metric("⏳ ETA", f"{eta:.1f}s" if pct < 1 else "—")
+
+            time.sleep(0.11)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # PIPELINE
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -347,7 +396,7 @@ def _guardar_resultado(resultado, nombre):
 # SIDEBAR
 # ══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
-    st.markdown("## 🎬 VideoAI")
+    st.markdown("## 🐆 Pantera Lab Video")
     st.markdown("**Pipeline de Procesamiento**")
     st.divider()
 
@@ -382,7 +431,7 @@ with st.sidebar:
 # ══════════════════════════════════════════════════════════════════════════════
 # CABECERA
 # ══════════════════════════════════════════════════════════════════════════════
-st.title("🎬 VideoAI · Pipeline de Procesamiento")
+st.title("🐆 Pantera Lab Video · Pipeline de Procesamiento")
 
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("📹 Videos procesados", st.session_state.videos_procesados)
@@ -464,6 +513,10 @@ if _ejecutar:
 
     ext = nombre.rsplit(".", 1)[-1].lower()
     ct = CONTENT_TYPES.get(ext, "video/mp4")
+
+    # Métricas animadas de subida
+    with col_izq:
+        _animar_subida(nombre, len(data))
 
     # Subir al bucket S3
     ok, clave = subir_archivo(data, nombre, ct)
