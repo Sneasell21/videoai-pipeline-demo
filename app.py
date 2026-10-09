@@ -198,17 +198,41 @@ def _sb():
 
 
 def sb_listar_videos():
-    """Lista videos en el bucket de Supabase. Retorna (lista, error_str|None)."""
+    """
+    Lista videos en el bucket (raíz + un nivel de subcarpetas).
+    El campo 'name' de cada entrada incluye la ruta completa (ej. PiCam01/video.mp4).
+    Retorna (lista, error_str|None).
+    """
     client = _sb()
     if client is None:
         return [], "No se pudo crear el cliente Supabase — verificá SUPABASE_URL y SUPABASE_KEY."
     try:
-        archivos = client.storage.from_(SUPABASE_BUCKET).list()
-        videos = [
-            f for f in archivos
-            if isinstance(f, dict) and f.get("name", "").split(".")[-1].lower() in CONTENT_TYPES
-        ]
-        return videos, None
+        resultado = []
+        raiz = client.storage.from_(SUPABASE_BUCKET).list() or []
+
+        for entry in raiz:
+            if not isinstance(entry, dict):
+                continue
+            nombre = entry.get("name", "")
+            ext = nombre.rsplit(".", 1)[-1].lower() if "." in nombre else ""
+
+            if ext in CONTENT_TYPES:
+                resultado.append(entry)
+            elif entry.get("id") is None and nombre:
+                # entrada sin id → es una carpeta; listar su contenido
+                try:
+                    sub = client.storage.from_(SUPABASE_BUCKET).list(nombre) or []
+                    for f in sub:
+                        if not isinstance(f, dict):
+                            continue
+                        if f.get("name", "").rsplit(".", 1)[-1].lower() in CONTENT_TYPES:
+                            f_copia = dict(f)
+                            f_copia["name"] = f"{nombre}/{f['name']}"
+                            resultado.append(f_copia)
+                except Exception:
+                    pass
+
+        return resultado, None
     except Exception as e:
         return [], str(e)
 
@@ -239,17 +263,37 @@ def sb_diagnostico():
     try:
         raw = client.storage.from_(SUPABASE_BUCKET).list() or []
         info["total_objetos_raw"] = len(raw)
+        # Expandir subcarpetas para el diagnóstico
+        todos = []
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            nombre = entry.get("name", "")
+            if entry.get("id") is None and nombre and "." not in nombre:
+                # es carpeta
+                try:
+                    sub = client.storage.from_(SUPABASE_BUCKET).list(nombre) or []
+                    for f in sub:
+                        if isinstance(f, dict):
+                            f_copia = dict(f)
+                            f_copia["name"] = f"{nombre}/{f.get('name', '')}"
+                            todos.append(f_copia)
+                except Exception:
+                    pass
+            else:
+                todos.append(entry)
+
         info["objetos_raw"] = [
             {"name": f.get("name"), "size": (f.get("metadata") or {}).get("size"), "created_at": f.get("created_at")}
-            for f in raw if isinstance(f, dict)
+            for f in todos if isinstance(f, dict)
         ]
         info["extensiones_encontradas"] = sorted({
             f.get("name", "").rsplit(".", 1)[-1].lower()
-            for f in raw
+            for f in todos
             if isinstance(f, dict) and "." in f.get("name", "")
         })
         videos = [
-            f for f in raw
+            f for f in todos
             if isinstance(f, dict) and f.get("name", "").split(".")[-1].lower() in CONTENT_TYPES
         ]
         info["videos_filtrados"] = len(videos)
@@ -729,7 +773,7 @@ def seccion_videos_entrantes():
                 st.markdown("**Todos los objetos en el bucket:**")
                 st.dataframe(d["objetos_raw"], use_container_width=True, hide_index=True)
             elif d["cliente_ok"] and d["total_objetos_raw"] == 0:
-                st.warning(f"El bucket `{SUPABASE_BUCKET}` existe pero está vacío.")
+                st.warning(f"El bucket `{SUPABASE_BUCKET}` está vacío (raíz y subcarpetas).")
 
     if not SUPABASE_DISPONIBLE:
         return
