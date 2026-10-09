@@ -198,18 +198,19 @@ def _sb():
 
 
 def sb_listar_videos():
-    """Lista videos en el bucket de Supabase. Retorna lista de dicts."""
+    """Lista videos en el bucket de Supabase. Retorna (lista, error_str|None)."""
     client = _sb()
     if client is None:
-        return []
+        return [], "No se pudo crear el cliente Supabase — verificá SUPABASE_URL y SUPABASE_KEY."
     try:
         archivos = client.storage.from_(SUPABASE_BUCKET).list()
-        return [
+        videos = [
             f for f in archivos
-            if f.get("name", "").split(".")[-1].lower() in CONTENT_TYPES
+            if isinstance(f, dict) and f.get("name", "").split(".")[-1].lower() in CONTENT_TYPES
         ]
-    except Exception:
-        return []
+        return videos, None
+    except Exception as e:
+        return [], str(e)
 
 
 def sb_descargar_video(nombre: str):
@@ -646,7 +647,11 @@ def seccion_videos_entrantes():
         )
         return
 
-    videos = sb_listar_videos()
+    videos, sb_error = sb_listar_videos()
+
+    if sb_error:
+        st.error(f"❌ Error al leer Supabase: `{sb_error}`")
+        return
 
     if not videos:
         st.info("⏳ Sin videos entrantes todavía. El equipo externo puede subir videos al bucket `videos` de Supabase.")
