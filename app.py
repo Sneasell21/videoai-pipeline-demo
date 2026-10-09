@@ -681,10 +681,9 @@ def seccion_videos_entrantes():
     ya_procesados = {h["Nombre"] for h in st.session_state.historial}
     st.caption(f"{len(videos)} video{'s' if len(videos) > 1 else ''} disponible{'s' if len(videos) > 1 else ''}")
 
-    cols_per_row = 3
-    for i in range(0, len(videos), cols_per_row):
-        cols = st.columns(cols_per_row)
-        for col, v in zip(cols, videos[i : i + cols_per_row]):
+    for i in range(0, len(videos), 2):
+        cols = st.columns(2)
+        for col, v in zip(cols, videos[i : i + 2]):
             nombre = v["name"]
             size_mb = (v.get("metadata") or {}).get("size", 0) / 1024 / 1024
             fecha = (v.get("created_at") or "")[:10]
@@ -692,10 +691,22 @@ def seccion_videos_entrantes():
 
             with col:
                 with st.container(border=True):
-                    st.markdown(
-                        f"{'🟢 **Procesado**' if procesado else '🟡 **Pendiente**'}"
+                    # Header: nombre + badge
+                    h1, h2 = st.columns([3, 1])
+                    h1.markdown(f"**{nombre}**")
+                    h2.markdown(
+                        f"<div style='text-align:right'>{'🟢' if procesado else '🟡'}</div>",
+                        unsafe_allow_html=True,
                     )
-                    st.markdown(f"**{nombre}**")
+
+                    # Player inline
+                    url = sb_url_video(nombre)
+                    if url:
+                        st.video(url)
+                    else:
+                        st.caption("⚠️ Preview no disponible.")
+
+                    # Metadata
                     meta = []
                     if size_mb > 0:
                         meta.append(f"📦 {size_mb:.1f} MB")
@@ -704,16 +715,10 @@ def seccion_videos_entrantes():
                     if meta:
                         st.caption(" · ".join(meta))
 
-                    with st.expander("▶ Vista previa"):
-                        url = sb_url_video(nombre)
-                        if url:
-                            st.video(url)
-                        else:
-                            st.caption("Preview no disponible.")
-
+                    # Acción
                     if not procesado:
                         if st.button(
-                            "🚀 Procesar",
+                            "🚀 Procesar este video",
                             key=f"sb_{nombre}",
                             type="primary",
                             use_container_width=True,
