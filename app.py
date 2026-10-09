@@ -71,9 +71,7 @@ CONTENT_TYPES = {
 st.markdown(
     """
 <style>
-/* Scrollbar en el log */
 .stCode > div { max-height: 230px; overflow-y: auto; }
-/* Separador suave en métricas */
 [data-testid="metric-container"] { border-right: 1px solid rgba(255,255,255,0.06); }
 [data-testid="metric-container"]:last-child { border-right: none; }
 </style>
@@ -91,6 +89,7 @@ _DEFAULTS = {
     "objetos_detectados": 0,
     "historial": [],
     "resultado": None,
+    "video_pendiente": None,  # nombre de video en Supabase esperando ser procesado
 }
 for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:
@@ -100,8 +99,7 @@ for _k, _v in _DEFAULTS.items():
 # HELPERS S3
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _leer_secrets():
-    """Lee configuración S3 desde st.secrets. Retorna dict o None."""
+def _leer_secrets_s3():
     try:
         s = st.secrets
         return {
@@ -115,32 +113,31 @@ def _leer_secrets():
         return None
 
 
-_CFG = _leer_secrets()
-BUCKET_DISPONIBLE = _CFG is not None
+_CFG_S3 = _leer_secrets_s3()
+BUCKET_DISPONIBLE = _CFG_S3 is not None
 
 
 def _cliente_s3():
-    """Crea cliente boto3. Retorna (client, bucket) o (None, None)."""
-    if _CFG is None:
+    if _CFG_S3 is None:
         return None, None
     try:
-        import boto3  # import tardío para no fallar si boto3 no está disponible
+        import boto3
         client = boto3.client(
             "s3",
-            endpoint_url=_CFG["endpoint_url"],
-            aws_access_key_id=_CFG["aws_access_key_id"],
-            aws_secret_access_key=_CFG["aws_secret_access_key"],
-            region_name=_CFG["region_name"],
+            endpoint_url=_CFG_S3["endpoint_url"],
+            aws_access_key_id=_CFG_S3["aws_access_key_id"],
+            aws_secret_access_key=_CFG_S3["aws_secret_access_key"],
+            region_name=_CFG_S3["region_name"],
         )
-        return client, _CFG["bucket"]
+        return client, _CFG_S3["bucket"]
     except Exception:
         return None, None
 
 
 def subir_archivo(data: bytes, nombre: str, content_type: str):
     """
-    Sube el archivo al bucket S3.
-    Retorna: (True, clave) si OK · (False, clave) si error boto3 · (None, clave) si no configurado
+    Sube al bucket S3.
+    Retorna: (True, clave) OK · (False, clave) error boto3 · (None, clave) sin config
     """
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     clave = f"uploads/{ts}_{nombre}"
@@ -149,9 +146,7 @@ def subir_archivo(data: bytes, nombre: str, content_type: str):
         return None, clave
     try:
         client.upload_fileobj(
-            io.BytesIO(data),
-            bucket,
-            clave,
+            io.BytesIO(data), bucket, clave,
             ExtraArgs={"ContentType": content_type},
         )
         return True, clave
@@ -160,7 +155,6 @@ def subir_archivo(data: bytes, nombre: str, content_type: str):
 
 
 def url_firmada(clave: str):
-    """Genera URL prefirmada con validez de 1 hora."""
     client, bucket = _cliente_s3()
     if client is None:
         return None
@@ -170,6 +164,61 @@ def url_firmada(clave: str):
             Params={"Bucket": bucket, "Key": clave},
             ExpiresIn=3600,
         )
+    except Exception:
+        return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HELPERS SUPABASE
+# ══════════════════════════════════════════════════════════════════════════════
+
+SUPABASE_BUCKET = "videos"  # nombre del bucket en Supabase Storage
+
+
+def _leer_secrets_supabase():
+    try:
+        return st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"]
+    except Exception:
+        return None, None
+
+
+_SB_URL, _SB_KEY = _leer_secrets_supabase()
+SUPABASE_DISPONIBLE = _SB_URL is not None
+
+
+def _sb():
+    """Retorna cliente Supabase o None."""
+    if not SUPABASE_DISPONIBLE:
+        return None
+    try:
+        from supabase import create_client
+        return create_client(_SB_URL, _SB_KEY)
+    except Exception:
+        return None
+
+
+def sb_listar_videos():
+    """Lista videos en el bucket de Supabase. Retorna lista de dicts."""
+    client = _sb()
+    if client is None:
+        return []
+    try:
+        archivos = client.storage.from_(SUPABASE_BUCKET).list()
+        return [
+            f for f in archivos
+            if f.get("name", "").split(".")[-1].lower() in CONTENT_TYPES
+        ]
+    except Exception:
+        return []
+
+
+def sb_descargar_video(nombre: str):
+    """Descarga un video de Supabase. Retorna bytes o None."""
+    client = _sb()
+    if client is None:
+        return None
+    try:
+        return client.storage.from_(SUPABASE_BUCKET).download(nombre)
     except Exception:
         return None
 
@@ -186,14 +235,12 @@ def _generar_detecciones(seed: int):
         mm, ss, ms = rng.randint(0, 4), rng.randint(0, 59), rng.randint(0, 9)
         x1, y1 = rng.randint(0, 700), rng.randint(0, 400)
         x2, y2 = x1 + rng.randint(50, 250), y1 + rng.randint(30, 180)
-        rows.append(
-            {
-                "Timestamp video": f"{mm:02d}:{ss:02d}.{ms}",
-                "Clase": rng.choice(CLASES),
-                "Confianza": round(rng.uniform(0.62, 0.99), 3),
-                "Bounding box": f"[{x1}, {y1}, {x2}, {y2}]",
-            }
-        )
+        rows.append({
+            "Timestamp video": f"{mm:02d}:{ss:02d}.{ms}",
+            "Clase": rng.choice(CLASES),
+            "Confianza": round(rng.uniform(0.62, 0.99), 3),
+            "Bounding box": f"[{x1}, {y1}, {x2}, {y2}]",
+        })
     return rows
 
 
@@ -220,15 +267,7 @@ def _linea_log(rng, paso_idx: int, step: dict, frame: int, total: int) -> str:
 # PIPELINE
 # ══════════════════════════════════════════════════════════════════════════════
 
-def ejecutar_pipeline(
-    nombre: str,
-    tamaño: int,
-    clave: str,
-    real: bool,
-    vel: float,
-    step_phs: list,
-    log_ph,
-) -> dict:
+def ejecutar_pipeline(nombre, tamaño, clave, real, vel, step_phs, log_ph):
     """Anima el pipeline paso a paso. Retorna dict con todos los resultados."""
     seed = hash(nombre) & 0xFFFFFF
     rng = random.Random(seed)
@@ -240,7 +279,6 @@ def ejecutar_pipeline(
         log_ph.code("\n".join(log_lines[-18:]), language=None)
 
     t0 = time.time()
-
     for i, step in enumerate(STEPS):
         dur = vel * step["dur_rel"]
         ticks = max(6, int(dur / 0.18))
@@ -253,16 +291,13 @@ def ejecutar_pipeline(
             pct = int((tick + 1) / ticks * 100)
             frame_n = int((i + (tick + 1) / ticks) / len(STEPS) * total_frames)
             barra = "▰" * (pct // 10) + "▱" * (10 - pct // 10)
-
             step_phs[i].markdown(
                 f"🔵 **{step['nombre']}** `{barra}` {pct}%  \n"
                 f"*{step['descripcion']}*"
             )
-
             if tick % max(1, ticks // 4) == 0:
                 log_lines.append(_linea_log(rng, i, step, frame_n, total_frames))
                 render_log()
-
             time.sleep(dur / ticks)
 
         elapsed = round(time.time() - t_paso, 2)
@@ -294,6 +329,20 @@ def ejecutar_pipeline(
     }
 
 
+def _guardar_resultado(resultado, nombre):
+    st.session_state.resultado = resultado
+    st.session_state.videos_procesados += 1
+    st.session_state.ultimo_estado = "✅ Completado"
+    st.session_state.ultima_duracion = f"{resultado['tiempo_total']}s"
+    st.session_state.objetos_detectados = resultado["n_dets"]
+    st.session_state.historial.append({
+        "Nombre": nombre,
+        "Hora": datetime.now().strftime("%H:%M:%S"),
+        "Estado": "✅ Completado",
+        "Detecciones": resultado["n_dets"],
+    })
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SIDEBAR
 # ══════════════════════════════════════════════════════════════════════════════
@@ -302,10 +351,12 @@ with st.sidebar:
     st.markdown("**Pipeline de Procesamiento**")
     st.divider()
 
-    if BUCKET_DISPONIBLE:
-        st.markdown("**Bucket S3:** 🟢 Conectado")
-    else:
-        st.markdown("**Bucket S3:** 🔴 No configurado")
+    st.markdown(
+        f"**Bucket S3:** {'🟢 Conectado' if BUCKET_DISPONIBLE else '🔴 No configurado'}"
+    )
+    st.markdown(
+        f"**Supabase:** {'🟢 Conectado' if SUPABASE_DISPONIBLE else '🔴 No configurado'}"
+    )
 
     st.divider()
 
@@ -318,15 +369,10 @@ with st.sidebar:
 
     velocidad = st.slider(
         "⏱ Segundos por paso (base)",
-        min_value=0.3,
-        max_value=4.0,
-        value=1.5,
-        step=0.1,
-        help="Multiplicado por la duración relativa de cada paso.",
+        min_value=0.3, max_value=4.0, value=1.5, step=0.1,
     )
 
     st.divider()
-
     if st.button("🔄 Reiniciar sesión", use_container_width=True):
         for k in list(st.session_state.keys()):
             del st.session_state[k]
@@ -334,7 +380,7 @@ with st.sidebar:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CABECERA — métricas de sesión
+# CABECERA
 # ══════════════════════════════════════════════════════════════════════════════
 st.title("🎬 VideoAI · Pipeline de Procesamiento")
 
@@ -348,14 +394,13 @@ st.divider()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# LAYOUT PRINCIPAL — dos columnas
+# LAYOUT PRINCIPAL
 # ══════════════════════════════════════════════════════════════════════════════
 col_izq, col_der = st.columns([1, 1.2])
 
-# ── Columna izquierda: carga del archivo ──────────────────────────────────────
 with col_izq:
     with st.container(border=True):
-        st.markdown("##### 📤 Entrada")
+        st.markdown("##### 📤 Entrada manual")
         archivo = st.file_uploader(
             "Seleccioná un video",
             type=["mp4", "mov", "avi", "mkv", "webm"],
@@ -368,7 +413,7 @@ with col_izq:
                 "🚀 Subir y procesar", type="primary", use_container_width=True
             )
         else:
-            st.info("Subí un video para comenzar el pipeline.")
+            st.info("Subí un video manualmente, o procesá uno de los **Videos entrantes** (abajo).")
             procesar = False
 
     if archivo:
@@ -377,81 +422,77 @@ with col_izq:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# EJECUCIÓN DEL PIPELINE (solo cuando se hace clic en el botón)
+# EJECUCIÓN — unifica flujo manual (procesar) y desde Supabase (video_pendiente)
 # ══════════════════════════════════════════════════════════════════════════════
-if procesar and archivo:
-    # Construir el panel de pipeline en col_der ANTES de ejecutar
+_desde_supabase = bool(st.session_state.video_pendiente)
+_ejecutar = (procesar and archivo) or _desde_supabase
+
+if _ejecutar:
+    # Armar col_der con pipeline activo
     with col_der:
         with st.container(border=True):
             st.markdown("##### ⚙️ Pipeline en ejecución")
             step_phs = [st.empty() for _ in STEPS]
-
         with st.container(border=True):
             st.markdown("##### 📋 Log en vivo")
             log_ph = st.empty()
 
-    # Inicializar pasos como pendientes
     for i, step in enumerate(STEPS):
         step_phs[i].markdown(f"⚪ **{step['nombre']}**  \n*{step['descripcion']}*")
     log_ph.code("", language=None)
 
-    # ── Subida al bucket ─────────────────────────────────────────────────────
-    data = archivo.getvalue()
-    nombre = archivo.name
+    # Obtener datos del video según origen
+    if _desde_supabase:
+        nombre_sb = st.session_state.video_pendiente
+        st.session_state.video_pendiente = None
+
+        with col_izq:
+            with st.spinner(f"Descargando `{nombre_sb}` de Supabase..."):
+                data = sb_descargar_video(nombre_sb)
+
+        if data is None:
+            st.error(f"❌ No se pudo descargar `{nombre_sb}` de Supabase.")
+            st.stop()
+
+        nombre = nombre_sb
+        with col_izq:
+            st.markdown("**Vista previa**")
+            st.video(data)
+    else:
+        data = archivo.getvalue()
+        nombre = archivo.name
+
     ext = nombre.rsplit(".", 1)[-1].lower()
     ct = CONTENT_TYPES.get(ext, "video/mp4")
 
+    # Subir al bucket S3
     ok, clave = subir_archivo(data, nombre, ct)
-
     if ok is None:
-        # Bucket no configurado
-        st.warning("ℹ️ Bucket no configurado — procesando en modo demo.")
+        st.warning("ℹ️ Bucket S3 no configurado — procesando en modo demo.")
         subida_real = False
     elif ok is False:
-        # Error de boto3
         if not modo_demo:
-            st.error(
-                "❌ Error al subir al bucket. "
-                "Activá **Modo demo** en la barra lateral para continuar sin bucket."
-            )
+            st.error("❌ Error al subir al bucket. Activá **Modo demo** para continuar.")
             st.stop()
         else:
             st.warning("⚠️ Subida simulada (error en bucket) — modo demo activo.")
             subida_real = False
     else:
-        st.success(f"✅ Archivo subido al bucket → `{clave}`")
+        st.success(f"✅ Archivo subido al bucket S3 → `{clave}`")
         subida_real = True
 
-    # ── Ejecutar pipeline ────────────────────────────────────────────────────
+    # Correr pipeline
     resultado = ejecutar_pipeline(
-        nombre=nombre,
-        tamaño=len(data),
-        clave=clave,
-        real=subida_real,
-        vel=velocidad,
-        step_phs=step_phs,
-        log_ph=log_ph,
+        nombre=nombre, tamaño=len(data), clave=clave,
+        real=subida_real, vel=velocidad,
+        step_phs=step_phs, log_ph=log_ph,
     )
 
-    # Actualizar estado de sesión
-    st.session_state.resultado = resultado
-    st.session_state.videos_procesados += 1
-    st.session_state.ultimo_estado = "✅ Completado"
-    st.session_state.ultima_duracion = f"{resultado['tiempo_total']}s"
-    st.session_state.objetos_detectados = resultado["n_dets"]
-    st.session_state.historial.append(
-        {
-            "Nombre": nombre,
-            "Hora": datetime.now().strftime("%H:%M:%S"),
-            "Estado": "✅ Completado",
-            "Detecciones": resultado["n_dets"],
-        }
-    )
-
+    _guardar_resultado(resultado, nombre)
     st.rerun()
 
 else:
-    # ── Col derecha: estado estático (idle o procesamiento anterior) ──────────
+    # Col derecha: estado estático
     with col_der:
         with st.container(border=True):
             st.markdown("##### ⚙️ Pipeline de procesamiento")
@@ -465,7 +506,7 @@ else:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# RESULTADOS (persisten entre reruns via session_state)
+# RESULTADOS
 # ══════════════════════════════════════════════════════════════════════════════
 res = st.session_state.resultado
 if res:
@@ -476,57 +517,47 @@ if res:
         ["📋 Resumen", "🔍 Detecciones", "📈 Timeline", "📁 Archivo"]
     )
 
-    # ── Tab 1: Resumen ────────────────────────────────────────────────────────
     with tab1:
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Frames analizados", f"{res['frames']:,}")
         c2.metric("Detecciones totales", res["n_dets"])
         c3.metric("Confianza promedio", f"{res['conf_avg']:.1%}")
         c4.metric("Tiempo total", f"{res['tiempo_total']}s")
-        st.success(f"✅ Procesamiento completado exitosamente · `{res['nombre']}`")
+        st.success(f"✅ Procesamiento completado · `{res['nombre']}`")
 
-    # ── Tab 2: Detecciones ────────────────────────────────────────────────────
     with tab2:
         df = pd.DataFrame(res["detecciones"])
         st.dataframe(df, use_container_width=True, hide_index=True)
         st.markdown("**Confianza por detección**")
         st.line_chart(df[["Confianza"]], use_container_width=True)
 
-    # ── Tab 3: Timeline del pipeline ─────────────────────────────────────────
     with tab3:
-        df_tl = pd.DataFrame(
-            {
-                "Paso": [s["nombre"] for s in STEPS],
-                "Duración (s)": res["tiempos_paso"],
-            }
-        )
+        df_tl = pd.DataFrame({
+            "Paso": [s["nombre"] for s in STEPS],
+            "Duración (s)": res["tiempos_paso"],
+        })
         st.bar_chart(df_tl.set_index("Paso"), use_container_width=True)
 
-    # ── Tab 4: Info del archivo ───────────────────────────────────────────────
     with tab4:
-        st.markdown(f"**Clave del objeto en bucket:**")
+        st.markdown("**Clave del objeto en bucket:**")
         st.code(res["clave"])
         kb = res["tamaño_bytes"] / 1024
-        mb_val = kb / 1024
-        st.markdown(f"**Tamaño:** {kb:.1f} KB ({mb_val:.2f} MB)")
-
+        st.markdown(f"**Tamaño:** {kb:.1f} KB ({kb/1024:.2f} MB)")
         if res["real"]:
             url = url_firmada(res["clave"])
             if url:
-                st.markdown(f"**URL firmada (válida 1h):** [🔗 Abrir video en bucket]({url})")
+                st.markdown(f"**URL firmada (1h):** [🔗 Abrir video]({url})")
             else:
                 st.warning("No se pudo generar la URL firmada.")
         else:
             st.info("Subida simulada — no hay URL de bucket disponible.")
-
         if res.get("log"):
-            with st.expander("📋 Log completo del proceso"):
+            with st.expander("📋 Log completo"):
                 st.code("\n".join(res["log"]), language=None)
 
-    # ── Botón de descarga del reporte ─────────────────────────────────────────
     reporte_json = json.dumps(res, indent=2, ensure_ascii=False, default=str)
     st.download_button(
-        label="⬇️ Descargar reporte (JSON)",
+        "⬇️ Descargar reporte (JSON)",
         data=reporte_json,
         file_name=f"reporte_{res['nombre'].rsplit('.', 1)[0]}.json",
         mime="application/json",
@@ -534,13 +565,60 @@ if res:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# HISTORIAL DE LA SESIÓN
+# HISTORIAL
 # ══════════════════════════════════════════════════════════════════════════════
 if st.session_state.historial:
     n = len(st.session_state.historial)
-    with st.expander(f"📂 Procesamientos anteriores en esta sesión ({n} video{'s' if n > 1 else ''})"):
+    with st.expander(f"📂 Procesamientos anteriores en esta sesión ({n})"):
         st.dataframe(
             pd.DataFrame(st.session_state.historial),
-            use_container_width=True,
-            hide_index=True,
+            use_container_width=True, hide_index=True,
         )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# VIDEOS ENTRANTES — se refresca automáticamente cada 15 segundos
+# ══════════════════════════════════════════════════════════════════════════════
+@st.fragment(run_every=15)
+def seccion_videos_entrantes():
+    st.divider()
+    c_titulo, c_badge = st.columns([5, 1])
+    c_titulo.markdown("### 📥 Videos entrantes")
+    c_badge.caption("↻ cada 15 s")
+
+    if not SUPABASE_DISPONIBLE:
+        st.info(
+            "Configurá `SUPABASE_URL` y `SUPABASE_KEY` en Secrets para activar "
+            "la recepción de videos del equipo externo."
+        )
+        return
+
+    videos = sb_listar_videos()
+
+    if not videos:
+        st.info("⏳ Sin videos entrantes todavía. El equipo externo puede subir videos al bucket `videos` de Supabase.")
+        return
+
+    st.caption(f"{len(videos)} video{'s' if len(videos) > 1 else ''} disponible{'s' if len(videos) > 1 else ''}")
+
+    ya_procesados = {h["Nombre"] for h in st.session_state.historial}
+
+    for v in videos:
+        size_kb = (v.get("metadata") or {}).get("size", 0) / 1024
+        fecha = (v.get("created_at") or "")[:10]
+        procesado = v["name"] in ya_procesados
+
+        c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
+        c1.markdown(f"{'✅' if procesado else '📹'} **{v['name']}**")
+        c2.caption(f"{size_kb:.0f} KB")
+        c3.caption(fecha)
+
+        if procesado:
+            c4.caption("procesado")
+        else:
+            if c4.button("▶ Procesar", key=f"sb_{v['name']}", type="primary"):
+                st.session_state.video_pendiente = v["name"]
+                st.rerun()
+
+
+seccion_videos_entrantes()
