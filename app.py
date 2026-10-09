@@ -213,6 +213,54 @@ def sb_listar_videos():
         return [], str(e)
 
 
+def sb_diagnostico():
+    """
+    Retorna dict con info detallada del estado de Supabase para debug.
+    Nunca lanza excepción.
+    """
+    info = {
+        "url_configurada": bool(_SB_URL),
+        "key_configurada": bool(_SB_KEY),
+        "bucket": SUPABASE_BUCKET,
+        "cliente_ok": False,
+        "error_cliente": None,
+        "total_objetos_raw": None,
+        "objetos_raw": [],
+        "extensiones_encontradas": [],
+        "videos_filtrados": 0,
+        "error_list": None,
+        "test_url_firmada": None,
+    }
+    client = _sb()
+    if client is None:
+        info["error_cliente"] = "create_client falló — revisá SUPABASE_URL y SUPABASE_KEY"
+        return info
+    info["cliente_ok"] = True
+    try:
+        raw = client.storage.from_(SUPABASE_BUCKET).list() or []
+        info["total_objetos_raw"] = len(raw)
+        info["objetos_raw"] = [
+            {"name": f.get("name"), "size": (f.get("metadata") or {}).get("size"), "created_at": f.get("created_at")}
+            for f in raw if isinstance(f, dict)
+        ]
+        info["extensiones_encontradas"] = sorted({
+            f.get("name", "").rsplit(".", 1)[-1].lower()
+            for f in raw
+            if isinstance(f, dict) and "." in f.get("name", "")
+        })
+        videos = [
+            f for f in raw
+            if isinstance(f, dict) and f.get("name", "").split(".")[-1].lower() in CONTENT_TYPES
+        ]
+        info["videos_filtrados"] = len(videos)
+        if videos:
+            url = sb_url_video(videos[0]["name"])
+            info["test_url_firmada"] = "OK ✅" if url else "FALLO ❌ — bucket puede ser privado o create_signed_url falló"
+    except Exception as e:
+        info["error_list"] = str(e)
+    return info
+
+
 def sb_descargar_video(nombre: str):
     """Descarga un video de Supabase. Retorna bytes o None."""
     client = _sb()
@@ -658,11 +706,32 @@ def seccion_videos_entrantes():
     c_titulo.markdown("### 📥 Videos entrantes")
     c_badge.caption("↻ cada 15 s")
 
+    # ── Diagnóstico ──────────────────────────────────────────────────────────
+    with st.expander("🔧 Diagnóstico Supabase", expanded=not SUPABASE_DISPONIBLE):
+        if not SUPABASE_DISPONIBLE:
+            st.error("Supabase no configurado — faltan `SUPABASE_URL` o `SUPABASE_KEY` en Secrets.")
+        else:
+            d = sb_diagnostico()
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Cliente", "✅ OK" if d["cliente_ok"] else "❌ Error")
+            c2.metric("Objetos en bucket", d["total_objetos_raw"] if d["total_objetos_raw"] is not None else "—")
+            c3.metric("Videos reconocidos", d["videos_filtrados"])
+            c4.metric("URL firmada", d["test_url_firmada"] or "—")
+
+            if d["error_cliente"]:
+                st.error(f"Error de cliente: `{d['error_cliente']}`")
+            if d["error_list"]:
+                st.error(f"Error al listar bucket: `{d['error_list']}`")
+            if d["extensiones_encontradas"]:
+                st.caption(f"Extensiones en bucket: `{', '.join(d['extensiones_encontradas'])}`")
+                st.caption(f"Extensiones soportadas: `{', '.join(CONTENT_TYPES)}`")
+            if d["objetos_raw"]:
+                st.markdown("**Todos los objetos en el bucket:**")
+                st.dataframe(d["objetos_raw"], use_container_width=True, hide_index=True)
+            elif d["cliente_ok"] and d["total_objetos_raw"] == 0:
+                st.warning(f"El bucket `{SUPABASE_BUCKET}` existe pero está vacío.")
+
     if not SUPABASE_DISPONIBLE:
-        st.info(
-            "Configurá `SUPABASE_URL` y `SUPABASE_KEY` en Secrets para activar "
-            "la recepción de videos del equipo externo."
-        )
         return
 
     videos, sb_error = sb_listar_videos()
