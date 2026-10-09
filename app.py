@@ -203,7 +203,11 @@ def _sb_listar_recursivo(client, prefijo="", profundidad=0, max_prof=6):
     if profundidad > max_prof:
         return []
     try:
-        entradas = client.storage.from_(SUPABASE_BUCKET).list(prefijo) or []
+        # La raíz debe llamarse sin argumento; subcarpetas con su path
+        if prefijo:
+            entradas = client.storage.from_(SUPABASE_BUCKET).list(prefijo) or []
+        else:
+            entradas = client.storage.from_(SUPABASE_BUCKET).list() or []
     except Exception:
         return []
     resultado = []
